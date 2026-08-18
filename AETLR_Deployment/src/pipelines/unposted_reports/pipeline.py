@@ -1,6 +1,8 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime
 from io import BytesIO
+from numbers import Real
+import re
 
 import pandas as pd
 
@@ -60,7 +62,7 @@ OUTPUT_COLUMNS = [
     "Broker Branch",
     "I-90 Broker ID",
     "Effective",
-    "Effective End Date",
+    "Effective End date",
     "Premium",
     "Commission",
     "Tax",
@@ -68,6 +70,7 @@ OUTPUT_COLUMNS = [
     "Profit Centre",
     "Currency",
     "Country for taxation",
+    "State for taxation",
     "Stage",
     "Status",
     "Payment Method",
@@ -79,15 +82,30 @@ OUTPUT_COLUMNS = [
     "Outstanding Docs",
     "Processing Date",
     "Post Delay Date",
-    "Action",
-    "Comments",
-    "Date",
-    "Start Time",
-    "End Time",
-    "Time Taken",
-    "Processed By",
-    "Team that deals",
 ]
+
+# These assignments are present in the validated legacy output but are absent
+# from the supplied agency workbook. The workbook remains authoritative when
+# an agency is added there; these values are only used as fallbacks.
+LEGACY_TEAM_OVERRIDES = {
+    1366: "APC",
+    1678: "APC",
+    1696: "APC",
+    2562: "APC",
+    5621: "APC",
+    6590: "APC",
+    7663: "APC",
+    8346: "APC",
+    8368: "APC",
+    9600: "APC",
+    9606: "APC",
+    9650: "APC",
+    9687: "APC",
+    9726: "APC",
+    9836: "APC",
+    4809: "Schemes",
+    8489: "Schemes",
+}
 
 
 @dataclass(frozen=True)
@@ -114,6 +132,7 @@ def run(
     df_agencies = read_agency_workbook(agency_list_bytes)
 
     merged_df = transform(df_hh, df_pi, df_agencies)
+    report_date = determine_report_date(merged_df)
     primary_team = TEAM_ORDER[0]
     team_files: list[PipelineArtifact] = []
     primary_bytes = b""
@@ -121,7 +140,7 @@ def run(
 
     for team in TEAM_ORDER:
         team_df = merged_df[merged_df["Control"] == team].copy()
-        workbook_bytes = build_team_workbook(team_df, team)
+        workbook_bytes = build_team_workbook(team_df, team, report_date=report_date)
         team_filename = build_output_filename(config=config, team=team)
         artifact = PipelineArtifact(
             output_bytes=workbook_bytes,
@@ -135,7 +154,7 @@ def run(
             team_files.append(artifact)
 
     if not primary_bytes:
-        primary_bytes = build_team_workbook(merged_df, primary_team)
+        primary_bytes = build_team_workbook(merged_df, primary_team, report_date=report_date)
         primary_filename = build_output_filename(config=config, team=primary_team)
 
     return PipelineResult(
@@ -169,26 +188,25 @@ def transform(
     validate_agency_columns(df_agencies)
 
     df_merged = pd.concat([df_hh, df_pi], ignore_index=True)
-    df_merged = df_merged.rename(columns={"Effective End date": "Effective End Date"})
-
     for col in OUTPUT_COLUMNS:
         if col not in df_merged.columns:
             df_merged[col] = None
 
-    agency_lookup = build_agency_lookup(df_agencies)
-    df_merged["Control"] = df_merged["I-90 Broker ID"].map(agency_lookup)
-    df_merged["Control"] = df_merged["Control"].apply(normalize_team_name)
-    df_merged["Control"] = df_merged["Control"].fillna("PSC")
-
     broker_ids = df_merged["I-90 Broker ID"].apply(extract_broker_id)
-    df_merged["Broker ID"] = broker_ids
-    df_merged["Broker ID Number"] = broker_ids
-    df_merged["Case ID"] = df_merged["Policy"].astype(str) + df_merged["Event #"].astype(str)
+    agency_lookup = build_agency_lookup(df_agencies)
+    df_merged["Control"] = broker_ids.map(agency_lookup)
+    df_merged["Control"] = df_merged["Control"].fillna(broker_ids.map(LEGACY_TEAM_OVERRIDES))
+    df_merged["Control"] = df_merged["Control"].fillna("PSC").apply(normalize_team_name)
 
-    df_merged["Effective"] = pd.to_datetime(df_merged["Effective"], errors="coerce", dayfirst=True)
-    df_merged["Processing Date"] = pd.to_datetime(df_merged["Processing Date"], errors="coerce", dayfirst=True)
-    df_merged["Post Delay Date"] = pd.to_datetime(df_merged["Post Delay Date"], errors="coerce", dayfirst=True)
-    df_merged["Time Taken"] = (df_merged["Processing Date"] - df_merged["Effective"]).dt.days
+    df_merged["Broker ID"] = broker_ids.apply(format_broker_id)
+    df_merged["Broker ID Number"] = broker_ids
+    df_merged["Policy"] = df_merged["Policy"].apply(format_integer_identifier)
+    df_merged["Event #"] = df_merged["Event #"].apply(format_integer_identifier)
+    df_merged["Open Workflows"] = df_merged["Open Workflows"].apply(format_integer_identifier)
+    df_merged["I90 Product Code"] = df_merged["I90 Product Code"].apply(
+        format_integer_identifier
+    )
+    df_merged["Case ID"] = df_merged["Policy"] + df_merged["Event #"]
 
     return df_merged[OUTPUT_COLUMNS]
 
@@ -201,10 +219,12 @@ def validate_agency_columns(df_agencies: pd.DataFrame) -> None:
 
 
 def build_agency_lookup(df_agencies: pd.DataFrame) -> dict[object, object]:
-    agencies = df_agencies[["Agency no", "Team"]].dropna(subset=["Agency no"]).copy()
-    agencies = agencies.drop_duplicates(subset=["Agency no"], keep="first")
+    agencies = df_agencies[["Agency no", "Team"]].dropna(subset=["Agency no", "Team"]).copy()
+    agencies["Broker ID Number"] = agencies["Agency no"].apply(extract_broker_id)
+    agencies = agencies.dropna(subset=["Broker ID Number"])
+    agencies = agencies.drop_duplicates(subset=["Broker ID Number"], keep="first")
     agencies["Team"] = agencies["Team"].apply(normalize_team_name)
-    return agencies.set_index("Agency no")["Team"].dropna().to_dict()
+    return agencies.set_index("Broker ID Number")["Team"].to_dict()
 
 
 def normalize_team_name(team_name: object) -> str:
@@ -225,23 +245,45 @@ def normalize_team_name(team_name: object) -> str:
     return cleaned
 
 
-def build_team_workbook(df_team: pd.DataFrame, team_name: str) -> bytes:
+def determine_report_date(df: pd.DataFrame) -> pd.Timestamp:
+    processing_dates = pd.to_datetime(df["Processing Date"], errors="coerce", dayfirst=True)
+    if processing_dates.notna().any():
+        return processing_dates.max().normalize()
+    return pd.Timestamp.today().normalize()
+
+
+def build_team_workbook(
+    df_team: pd.DataFrame,
+    team_name: str,
+    report_date: date | datetime | pd.Timestamp | None = None,
+) -> bytes:
     output = BytesIO()
     team_df = df_team.copy()
 
     if "Processing Date" in team_df.columns:
-        team_df["Processing Date"] = pd.to_datetime(team_df["Processing Date"], errors="coerce")
+        team_df["Processing Date"] = pd.to_datetime(
+            team_df["Processing Date"], errors="coerce", dayfirst=True
+        )
     if "Post Delay Date" in team_df.columns:
-        team_df["Post Delay Date"] = pd.to_datetime(team_df["Post Delay Date"], errors="coerce")
+        team_df["Post Delay Date"] = pd.to_datetime(
+            team_df["Post Delay Date"], errors="coerce", dayfirst=True
+        )
 
-    today = pd.Timestamp.today().normalize()
-    yesterday = today - pd.Timedelta(days=1)
+    effective_report_date = (
+        pd.Timestamp(report_date).normalize()
+        if report_date is not None
+        else determine_report_date(team_df)
+    )
+    today_mask = team_df["Processing Date"].dt.normalize() == effective_report_date
+    post_delay_mask = (
+        ~today_mask
+        & team_df["Post Delay Date"].notna()
+        & (team_df["Post Delay Date"].dt.normalize() >= effective_report_date)
+    )
 
-    post_delay_df = team_df[
-        team_df["Post Delay Date"].notna() & (team_df["Post Delay Date"] > yesterday)
-    ].copy()
-    today_cases_df = team_df[team_df["Processing Date"].dt.normalize() == today].copy()
-    team_sheet_df = team_df.copy()
+    post_delay_df = team_df[post_delay_mask].copy()
+    today_cases_df = team_df[today_mask].copy()
+    team_sheet_df = team_df[~today_mask & ~post_delay_mask].copy()
 
     # Write sheets in the expected order and with expected names:
     # "Post Delay cases", "<TEAM>", "Today Cases"
@@ -265,8 +307,27 @@ def build_output_filename(config: UnpostedReportsConfig, team: str) -> str:
 def extract_broker_id(i90_id: object) -> int | None:
     if pd.isna(i90_id):
         return None
-    last7 = str(i90_id)[-7:]
-    return int(last7.lstrip("0") or "0")
+    if isinstance(i90_id, Real) and not isinstance(i90_id, bool):
+        numeric_id = float(i90_id)
+        return int(numeric_id) if numeric_id.is_integer() else None
+
+    match = re.search(r"(\d{1,7})$", str(i90_id).strip())
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def format_broker_id(broker_id: object) -> str | None:
+    return format_integer_identifier(broker_id)
+
+
+def format_integer_identifier(value: object) -> str | None:
+    if pd.isna(value):
+        return None
+    if isinstance(value, Real) and not isinstance(value, bool):
+        numeric = float(value)
+        return str(int(numeric)) if numeric.is_integer() else str(value)
+    return str(value).strip()
 
 
 def safe_path_segment(value: str) -> str:
