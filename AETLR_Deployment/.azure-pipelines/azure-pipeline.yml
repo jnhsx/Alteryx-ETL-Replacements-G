@@ -1,0 +1,112 @@
+parameters:
+- name: poolDevTest
+  default: ado-core-agents-uk-devtest-tf1-10
+  type: string
+- name: poolProd
+  default: ado-core-agents-uk-production-tf1-10
+  type: string
+- name: decommission
+  default: false
+  type: boolean
+- name: gitleaks_scan
+  type: string
+  default: true
+- name: detect_secrets_scan
+  type: string
+  default: true
+- name: dependency_check_scan
+  type: string
+  default: true           # turn off if this repo has no dependencies to analyse
+- name: sonarqube_scan
+  type: string
+  default: false           # turn off if this repo has no build/test step to analyse yet
+- name: waitForQualityGate
+  type: boolean
+  default: true           # only takes effect once sonarqube_scan is enabled
+- name: failOnQualityGate
+  type: boolean
+  default: true           # only takes effect once sonarqube_scan is enabled
+- name: upload_to_defectdojo
+  type: boolean
+  default: true
+
+
+resources:
+  repositories:
+  - repository: HSX-Shared-Pipeline-Templates
+    type: git
+    name: core-shared/HSX-Shared-Pipeline-Templates
+    ref: refs/heads/feat/uk-devsecops
+
+trigger:
+  branches:
+    include:
+    - '*'
+
+
+stages:
+# DEVTEST
+  - stage: DEVTEST_CODE_DEPLOY_NE
+    displayName: "DEPLOY DEVTEST FUNCTION APP NORTHEUROPE"
+    dependsOn: []
+    condition: ne(variables['Build.Reason'], 'Schedule')
+    jobs:
+    - template: deploy-function.yml
+      parameters:
+        pool: ${{ parameters.poolDevTest }}
+        connectedServiceName: 'devtest-uk-svc-kv-wif'
+        environment: 'devtest'
+        functionAppName: 'dt-ukia-fa-aetlr-ne' 
+        resourceGroup: 'dt-ukia-rg-aetlr-ne'
+        KeyVaultName: 'dtukkvne'
+        gitleaks_scan: ${{ parameters.gitleaks_scan }}
+        detect_secrets_scan: ${{ parameters.detect_secrets_scan }}
+        dependency_check_scan: ${{ parameters.dependency_check_scan }}
+        sonarqube_scan: ${{ parameters.sonarqube_scan }}
+        waitForQualityGate: ${{ parameters.waitForQualityGate }}
+        failOnQualityGate: ${{ parameters.failOnQualityGate }}
+        upload_to_defectdojo: ${{ parameters.upload_to_defectdojo }}
+
+# PREPROD
+  - stage: PREPROD_CODE_DEPLOY_NE
+    displayName: "DEPLOY PREPROD FUNCTION APP NORTHEUROPE"
+    dependsOn: []
+    condition: and(ne(variables['Build.Reason'], 'Schedule'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+    - template: deploy-function.yml
+      parameters:
+        pool: ${{ parameters.poolProd }}
+        connectedServiceName: 'prod-uk-svc-kv-wif'
+        environment: 'preprod'
+        functionAppName: 'pp-ukia-fa-aetlr-ne' 
+        resourceGroup: 'pp-ukia-rg-aetlr-ne'
+        KeyVaultName: 'prukkvne'
+        gitleaks_scan: ${{ parameters.gitleaks_scan }}
+        detect_secrets_scan: ${{ parameters.detect_secrets_scan }}
+        dependency_check_scan: ${{ parameters.dependency_check_scan }}
+        sonarqube_scan: ${{ parameters.sonarqube_scan }}
+        waitForQualityGate: ${{ parameters.waitForQualityGate }}
+        failOnQualityGate: ${{ parameters.failOnQualityGate }}
+        upload_to_defectdojo: ${{ parameters.upload_to_defectdojo }}
+
+# PROD
+  - stage: PROD_CODE_DEPLOY_NE
+    displayName: "DEPLOY PROD FUNCTION APP NORTHEUROPE"
+    dependsOn: []
+    condition: and(ne(variables['Build.Reason'], 'Schedule'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+    - template: deploy-function.yml
+      parameters:
+        pool: ${{ parameters.poolProd }}
+        connectedServiceName: 'prod-uk-svc-kv-wif'
+        environment: 'prod'
+        functionAppName: 'pd-ukia-fa-aetlr-ne' 
+        resourceGroup: 'pd-ukia-rg-aetlr-ne'
+        KeyVaultName: 'prukkvne'
+        gitleaks_scan: ${{ parameters.gitleaks_scan }}
+        detect_secrets_scan: ${{ parameters.detect_secrets_scan }}
+        dependency_check_scan: ${{ parameters.dependency_check_scan }}
+        sonarqube_scan: ${{ parameters.sonarqube_scan }}
+        waitForQualityGate: ${{ parameters.waitForQualityGate }}
+        failOnQualityGate: ${{ parameters.failOnQualityGate }}
+        upload_to_defectdojo: ${{ parameters.upload_to_defectdojo }}

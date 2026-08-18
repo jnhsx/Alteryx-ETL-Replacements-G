@@ -1,0 +1,223 @@
+parameters:
+  - name: environment
+    type: string
+    values:
+      - devtest
+      - preprod
+      - prod
+  - name: connectedServiceName
+    type: string
+  - name: pool
+    type: string
+  - name: functionAppName
+    type: string
+  - name: resourceGroup
+    type: string
+  - name: timeoutInMinutes
+    type: number
+    default: 10
+  - name: KeyVaultName
+    type: string
+  - name: gitleaks_scan
+    type: string
+    default: true
+  - name: detect_secrets_scan
+    type: string
+    default: true
+  - name: dependency_check_scan
+    type: string
+    default: true           # turn off if this repo has no dependencies to analyse
+  - name: sonarqube_scan
+    type: string
+    default: false           # turn off if this repo has no build/test step to analyse yet
+  - name: waitForQualityGate
+    type: boolean
+    default: true           # only takes effect once sonarqube_scan is enabled
+  - name: failOnQualityGate
+    type: boolean
+    default: true           # only takes effect once sonarqube_scan is enabled
+  - name: upload_to_defectdojo
+    type: boolean
+    default: true
+
+
+jobs:
+    - job: SECURITY_SCANS
+      displayName: "Run security scans"
+      pool:
+        name: ${{ parameters.pool }}
+      workspace:
+        clean: all
+      timeoutInMinutes: 60
+      steps:
+        - checkout: self
+          clean: true
+          path: src
+          # Pins self to $(Pipeline.Workspace)/s. This job also transitively
+          # checks out HSX-Shared-Pipeline-Templates (multi-checkout), so
+          # unpinned self would default one level deeper. Checkov/
+          # Dependency-Check/SonarQube below all assume self is at this path.
+
+        # Gitleaks — scans the repo (incl. git history) for leaked secrets.
+        - template: middleware/uk/gitleaks.yml@HSX-Shared-Pipeline-Templates
+          parameters:
+            gitleaks_scan: ${{ parameters.gitleaks_scan }}
+            upload_to_defectdojo: ${{ parameters.upload_to_defectdojo }}
+            fail_on_new_secrets: 'true'  # pragma: allowlist secret
+
+        # Detect-Secrets — scans for newly introduced secrets vs. a baseline.
+        - template: middleware/uk/detect-secrets.yml@HSX-Shared-Pipeline-Templates
+          parameters:
+            connectedServiceName: ${{ parameters.connectedServiceName }}
+            KeyVaultName: ${{ parameters.KeyVaultName }}
+            detect_secrets_scan: ${{ parameters.detect_secrets_scan }}
+            upload_to_defectdojo: ${{ parameters.upload_to_defectdojo }}
+            fail_on_new_secrets: 'true'  # pragma: allowlist secret
+
+        # OWASP Dependency-Check — scans for known CVEs in your dependencies.
+        - template: middleware/uk/dependency-check.yml@HSX-Shared-Pipeline-Templates
+          parameters:
+            dependency_check_scan: ${{ parameters.dependency_check_scan }}
+            upload_to_defectdojo: ${{ parameters.upload_to_defectdojo }}
+            dependencyCheckFailOnCritical: true
+
+        # SonarQube — code quality + security hotspots + quality gate.
+        - template: middleware/uk/sonarqube.yml@HSX-Shared-Pipeline-Templates
+          parameters:
+            connectedServiceName: ${{ parameters.connectedServiceName }}
+            KeyVaultName: ${{ parameters.KeyVaultName }}
+            sonarqube_scan: ${{ parameters.sonarqube_scan }}
+            waitForQualityGate: ${{ parameters.waitForQualityGate }}
+            failOnQualityGate: ${{ parameters.failOnQualityGate }}
+            upload_to_defectdojo: ${{ parameters.upload_to_defectdojo }}
+
+    - deployment: DeployFunctionApp
+      displayName: "Package and deploy Function App"
+      dependsOn: SECURITY_SCANS
+      condition: succeeded('SECURITY_SCANS')
+      pool:
+        name: ${{ parameters.pool }}
+      environment: ${{ parameters.environment }}
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - checkout: self
+                clean: true
+
+              # ── 1. Install Python dependencies into a local folder ──────
+              - bash: |
+                  set -euo pipefail
+
+                  if command -v python3.11 >/dev/null 2>&1; then
+                    PYTHON_BIN=python3.11
+                  elif command -v python3 >/dev/null 2>&1; then
+                    PYTHON_BIN=python3
+                  else
+                    echo "Python 3 is not installed on this agent."
+                    exit 1
+                  fi
+
+                  "$PYTHON_BIN" -m pip install --upgrade pip
+                  "$PYTHON_BIN" -m pip install \
+                    --target "$(Build.SourcesDirectory)/src/.python_packages/lib/site-packages" \
+                    -r "$(Build.SourcesDirectory)/src/requirements.txt"
+                displayName: "Install Python dependencies"
+
+              # ── 2. Zip the function app code ────────────────────────────
+              - pwsh: |
+                  $src  = "$(Build.SourcesDirectory)/src"
+                  $dest = "$(Build.ArtifactStagingDirectory)/function.zip"
+
+                  Compress-Archive -Path "$src\*" `
+                    -DestinationPath $dest `
+                    -Force
+
+                  Write-Host "Created zip: $dest"
+                displayName: "Zip function app"
+
+              # ── 3. Deploy zip to Function App (Flex Consumption) ────────
+              
+              - task: AzureCLI@2
+                displayName: "Deploy zip to Function App"
+                timeoutInMinutes: 10
+                inputs:
+                  azureSubscription: ${{ parameters.connectedServiceName }}
+                  scriptType: pscore
+                  scriptLocation: inlineScript
+                  inlineScript: |
+                    $zipPath = "$(Build.ArtifactStagingDirectory)/function.zip"
+                    $functionAppName = "${{ parameters.functionAppName }}"
+                    $functionRg = "${{ parameters.resourceGroup }}"
+
+                    Write-Host "Deploying $zipPath to Function App $functionAppName..."
+
+                    # Capture both stdout and stderr, but suppress stderr for this specific error
+                    $deployOutput = az functionapp deployment source config-zip `
+                      --name $functionAppName `
+                      --resource-group $functionRg `
+                      --src $zipPath `
+                      --timeout 1800 2>&1
+                    
+                    $exitCode = $LASTEXITCODE
+                    $text = ($deployOutput | Out-String)
+
+                    # Filter out the host key error from output (it's expected for Flex Consumption)
+                    $filteredOutput = $deployOutput | Where-Object { $_ -notmatch "Failed to fetch host key" }
+                    
+                    # Print filtered CLI output for logs
+                    $filteredOutput | ForEach-Object { Write-Host $_ }
+
+                    # Check if deployment succeeded despite the error
+                    if ($text -match "Zip deployment complete" -or $text -match "Deploy from zip") {
+                        Write-Host "Zip deployment completed successfully."
+                        exit 0
+                    }
+
+                    # If exit code was non-zero and we have the host key error, that's OK for Flex Consumption
+                    if ($exitCode -ne 0 -and $text -match "Failed to fetch host key") {
+                        Write-Host "Zip deployment completed (host key verification is not available immediately for Flex Consumption)."
+                        exit 0
+                    }
+
+                    # Any other error is a real failure
+                    if ($exitCode -ne 0) {
+                        throw "Zip deployment failed. Output: $text"
+                    }
+
+                    Write-Host "Zip deployment completed successfully."
+                    exit 0
+
+               
+
+# # Can not figure why this code is not working for python, so using the upper code instead.
+# jobs:
+#   - deployment: DeployFunction
+#     pool: ${{ parameters.pool }}
+#     environment: ${{ parameters.environment }}
+#     timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+#     strategy:
+#       runOnce:
+#         deploy:
+#           steps:
+#             - checkout: self
+#               clean: true
+                 
+#             - task: ArchiveFiles@2
+#               displayName: 'Archive Function App'
+#               inputs:
+#                 rootFolderOrFile: '$(System.DefaultWorkingDirectory)/src'
+#                 includeRootFolder: false
+#                 archiveType: 'zip'
+#                 archiveFile: '$(Build.ArtifactStagingDirectory)/function-app.zip'
+#                 replaceExistingArchive: true
+
+#             - task: AzureFunctionApp@2
+#               displayName: Deploy Function App in primary region
+#               inputs:
+#                 connectedServiceNameARM: ${{ parameters.connectedServiceName }}
+#                 appType:  "functionAppLinux"
+#                 isFlexConsumption: true
+#                 appName:  ${{ parameters.functionAppName }}
+#                 resourceGroupName:  ${{ parameters.resourceGroup }}
+#                 package:  "$(Build.ArtifactStagingDirectory)/function-app.zip"

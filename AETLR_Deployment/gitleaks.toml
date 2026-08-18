@@ -1,0 +1,8 @@
+title = "Gitleaks Configuration"
+description = "Customize Gitleaks behavior. More info: https://hiscox.atlassian.net/wiki/spaces/UKIT/pages/6777274441/Gitleaks"
+[extend]
+# useDefault will extend the base configuration with the default gitleaks config:
+# https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml 
+useDefault = true
+[allowlist]
+paths = ['.secrets.baseline']

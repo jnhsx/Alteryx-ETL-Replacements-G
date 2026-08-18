@@ -1,0 +1,10 @@
+<<<<<<< HEAD
+legacy/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+local.settings.json
+=======
+.venv
+>>>>>>> 5f68607ede65561f23a941ec98cbb512dde03b0c
