@@ -16,11 +16,17 @@ EXPECTED_COLUMNS = {
     "TOTAL_PREMIUM_PAYABLE",
 }
 
+SUPPORTED_INPUT_TYPES = {
+    "merlin": "Merlin",
+    "magic": "Magic",
+}
+
 
 @dataclass(frozen=True)
 class FloodReConfig:
     selected_month: str = ""
     version: str = ""
+    input_type: str = ""
 
 
 def run(input_bytes: bytes, filename: str, config: FloodReConfig) -> PipelineResult:
@@ -29,7 +35,7 @@ def run(input_bytes: bytes, filename: str, config: FloodReConfig) -> PipelineRes
 
     report_date = parse_report_date(config.selected_month) if config.selected_month.strip() else pd.Timestamp.today()
     report_month = config.selected_month.strip() or report_date.strftime("%B")
-    df = extract(input_bytes)
+    df = extract(input_bytes, config.input_type)
     output_df, invalid_rows = transform(df, report_date, report_month, config.version)
 
     safe_month = safe_path_segment(report_date.strftime("%Y-%m-%d"))
@@ -48,10 +54,32 @@ def run(input_bytes: bytes, filename: str, config: FloodReConfig) -> PipelineRes
     )
 
 
-def extract(input_bytes: bytes) -> pd.DataFrame:
-    merlin = load_clean_sheet(input_bytes, "Merlin")
-    magic = load_clean_sheet(input_bytes, "Magic")
-    return pd.concat([merlin, magic], ignore_index=True)
+def extract(input_bytes: bytes, input_type: str) -> pd.DataFrame:
+    requested_sheet = normalize_input_type(input_type)
+    with pd.ExcelFile(BytesIO(input_bytes)) as workbook:
+        sheets_found = workbook.sheet_names
+
+    matching_sheet = next(
+        (sheet for sheet in sheets_found if sheet.casefold() == requested_sheet.casefold()),
+        None,
+    )
+    if matching_sheet is None:
+        sheet_list = ", ".join(sheets_found) if sheets_found else "(none)"
+        raise ValueError(
+            f"process requested for {requested_sheet}, but no {requested_sheet} sheet was found. "
+            f"Sheets found: {sheet_list}"
+        )
+
+    return load_clean_sheet(input_bytes, matching_sheet)
+
+
+def normalize_input_type(input_type: str) -> str:
+    normalized = str(input_type).strip().casefold()
+    if normalized not in SUPPORTED_INPUT_TYPES:
+        raise ValueError(
+            f"Invalid input_type '{input_type}'. Expected 'merlin' or 'magic'."
+        )
+    return SUPPORTED_INPUT_TYPES[normalized]
 
 
 def load_clean_sheet(input_bytes: bytes, sheet_name: str) -> pd.DataFrame:

@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,11 +19,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         params = get_required_request_fields(
             payload,
             req,
-            ["blob_path", "correlation_id", "version", "storage_account"],
+            ["blob_path", "correlation_id", "version", "input_type", "storage_account"],
         )
         blob_path = params["blob_path"]
         correlation_id = params["correlation_id"]
         version = params["version"]
+        input_type = params["input_type"]
         storage_connection_string, storage_account_url = get_storage_credentials(params["storage_account"])
 
         input_location, input_bytes = download_blob_bytes(
@@ -35,7 +35,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         result = run(
             input_bytes=input_bytes,
             filename=Path(input_location.blob_name).name,
-            config=FloodReConfig(version=version),
+            config=FloodReConfig(version=version, input_type=input_type),
         )
 
         for warning in result.warnings:
