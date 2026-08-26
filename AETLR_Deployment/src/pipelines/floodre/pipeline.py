@@ -21,6 +21,10 @@ SUPPORTED_INPUT_TYPES = {
     "magic": "Magic",
 }
 
+DATE_ONLY_COLUMNS = {
+    "COVER_COMMENCES",
+}
+
 
 @dataclass(frozen=True)
 class FloodReConfig:
@@ -171,7 +175,8 @@ def format_date_columns(df: pd.DataFrame) -> pd.DataFrame:
     for column in df.columns:
         normalized_name = str(column).strip().upper()
         name_parts = [part for part in re.split(r"[^A-Z0-9]+", normalized_name) if part]
-        if normalized_name == "DATE" or "DATE" not in name_parts:
+        is_date_field = "DATE" in name_parts or normalized_name in DATE_ONLY_COLUMNS
+        if normalized_name == "DATE" or not is_date_field:
             continue
 
         parsed = pd.to_datetime(df[column], errors="coerce", dayfirst=True)
