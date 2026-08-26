@@ -107,6 +107,7 @@ def transform(
     report_version: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = df.copy()
+    df = default_missing_bedrooms(df)
     valid_mask = df.apply(is_valid_row, axis=1)
     invalid_rows = df[~valid_mask].copy()
     df = df[valid_mask].copy()
@@ -148,15 +149,36 @@ def transform(
     df["INSURER_NAME"] = "HISCOX LTD"
     df["INSURER_FCA_NUMBER"] = "113849"
 
-    rating_date_columns = [
-        "BUILDING_TRANSACTION_RATING_DATE",
-        "CONTENTS_TRANSACTION_RATING_DATE",
-    ]
-    for col in rating_date_columns:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True).dt.strftime("%d/%m/%Y")
+    df = format_date_columns(df)
 
     return df, invalid_rows
+
+
+def default_missing_bedrooms(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    column = "NUMBER_OF_BEDROOMS"
+    if column not in df.columns:
+        df[column] = 5
+        return df
+
+    missing_mask = df[column].isna() | df[column].astype(str).str.strip().eq("")
+    df.loc[missing_mask, column] = 5
+    return df
+
+
+def format_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for column in df.columns:
+        normalized_name = str(column).strip().upper()
+        name_parts = [part for part in re.split(r"[^A-Z0-9]+", normalized_name) if part]
+        if normalized_name == "DATE" or "DATE" not in name_parts:
+            continue
+
+        parsed = pd.to_datetime(df[column], errors="coerce", dayfirst=True)
+        formatted = parsed.dt.strftime("%d/%m/%Y")
+        df[column] = formatted.where(parsed.notna(), df[column])
+
+    return df
 
 
 def is_valid_row(row: pd.Series) -> bool:
@@ -170,7 +192,7 @@ def is_valid_row(row: pd.Series) -> bool:
         if pd.isna(row.get(field)) or str(row.get(field)).strip() == "":
             return False
 
-    bedrooms = str(row.get("NUMBER_OF_BEDROOMS", "")).strip()
+    bedrooms = str(row.get("NUMBER_OF_BEDROOMS", 5)).strip()
     if bedrooms != "6+" and not bedrooms.isdigit():
         return False
 
