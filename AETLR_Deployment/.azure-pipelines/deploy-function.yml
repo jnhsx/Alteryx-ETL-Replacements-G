@@ -29,7 +29,7 @@ parameters:
     default: true           # turn off if this repo has no dependencies to analyse
   - name: sonarqube_scan
     type: string
-    default: false           # turn off if this repo has no build/test step to analyse yet
+    default: true           # turn off if this repo has no build/test step to analyse yet
   - name: waitForQualityGate
     type: boolean
     default: true           # only takes effect once sonarqube_scan is enabled
