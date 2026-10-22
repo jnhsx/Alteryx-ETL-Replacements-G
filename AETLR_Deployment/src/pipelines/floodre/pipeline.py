@@ -116,9 +116,12 @@ def transform(
     invalid_rows = df[~valid_mask].copy()
     df = df[valid_mask].copy()
 
-    df["INSURER_REFERENCE"] = (
-        df["INSURER_REFERENCE"].astype(str) + "-" + df["FRID"].astype(str)
-    )
+    df["INSURER_REFERENCE"] = [
+        build_insurer_reference(insurer_reference, frid)
+        for insurer_reference, frid in zip(
+            df["INSURER_REFERENCE"], df["FRID"], strict=True
+        )
+    ]
     df["NUMBER_OF_BEDROOMS"] = df["NUMBER_OF_BEDROOMS"].replace("6+", "6")
 
     uppercase_fields = [
@@ -168,6 +171,19 @@ def default_missing_bedrooms(df: pd.DataFrame) -> pd.DataFrame:
     missing_mask = df[column].isna() | df[column].astype(str).str.strip().eq("")
     df.loc[missing_mask, column] = 5
     return df
+
+
+def build_insurer_reference(insurer_reference: object, frid: object) -> str:
+    reference = str(insurer_reference).strip()
+    frid_value = str(frid).strip()
+    normalized_reference = reference.casefold()
+    normalized_frid = frid_value.casefold()
+
+    if normalized_frid in normalized_reference:
+        return reference
+    if normalized_reference in normalized_frid:
+        return frid_value
+    return f"{reference}-{frid_value}"
 
 
 def format_date_columns(df: pd.DataFrame) -> pd.DataFrame:
